@@ -1,18 +1,13 @@
 # app.py
 import streamlit as st
 import pandas as pd
-import openai
-import os
 import time
 import re
 from io import BytesIO
+from openai import OpenAI
 
-# → plus besoin de python-dotenv ni de .env
-openai.api_key = st.secrets["OPENAI_API_KEY"]
-
-if not openai.api_key:
-    st.error("Clé API OpenAI non configurée. Veuillez contacter l'administrateur.")
-    st.stop()
+# → Récupère la clé depuis les Secrets Streamlit (jamais committée)
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 st.set_page_config(page_title="AI Excel Processor", layout="wide")
 st.title("🔧 AI Excel Processor")
@@ -27,7 +22,7 @@ st.dataframe(df, height=300)
 
 # --- Prépare session_state pour le prompt ---
 if "prompt_text" not in st.session_state:
-    st.session_state.prompt_text = ""  # initialisation
+    st.session_state.prompt_text = ""
 
 # 2) Zone de saisie du prompt
 st.markdown("### ✏️ Rédigez votre prompt")
@@ -75,13 +70,13 @@ if "stop_flag" not in st.session_state:
 if do_stop:
     st.session_state.stop_flag = True
 
-# **NOUVEAU** : placeholder pour afficher le DataFrame en live
+# **placeholder** pour afficher le DataFrame en live
 live_table = st.empty()
 progress   = st.empty()
 
 def call_chat(prompt: str) -> str:
     try:
-        resp = openai.ChatCompletion.create(
+        resp = client.chat.completions.create(
             model=model,
             temperature=temperature,
             messages=[
@@ -107,9 +102,8 @@ if do_run:
             except KeyError as e:
                 df.at[i, output_col] = f"Placeholder manquant : {e}"
                 continue
-            df.at[i, output_col] = call_chat(filled)
 
-            # Mise à jour en direct du tableau
+            df.at[i, output_col] = call_chat(filled)
             live_table.dataframe(df, height=300)
 
         progress.text(f"Traitement : {i+1}/{len(df)}")
@@ -117,10 +111,7 @@ if do_run:
 
     st.success("✅ Traitement terminé.")
     progress.empty()
-
-    # On laisse le tableau final affiché
 else:
-    # Avant de lancer, on affiche déjà le df original
     live_table.dataframe(df, height=300)
 
 # 10) Téléchargement
