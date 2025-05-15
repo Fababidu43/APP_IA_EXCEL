@@ -6,9 +6,10 @@ import os
 import time
 import re
 from io import BytesIO
-import streamlit as st
 
+# → plus besoin de python-dotenv ni de .env
 openai.api_key = st.secrets["OPENAI_API_KEY"]
+
 if not openai.api_key:
     st.error("Clé API OpenAI non configurée. Veuillez contacter l'administrateur.")
     st.stop()
