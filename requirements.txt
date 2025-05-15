@@ -1,1 +1,5 @@
-streamlit
+streamlit>=1.25
+pandas
+openai
+python-dotenv
+openpyxl
