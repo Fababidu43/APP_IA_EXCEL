@@ -12,12 +12,21 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 st.set_page_config(page_title="AI Excel Processor", layout="wide")
 st.title("🔧 AI Excel Processor")
 
-# 1) Upload & preview
+# 1) Upload & récupère tous les onglets
 uploaded = st.file_uploader("📂 Chargez votre fichier Excel", type=["xlsx"])
 if not uploaded:
     st.stop()
-df = pd.read_excel(uploaded, engine="openpyxl")
-st.success(f"Fichier chargé : {df.shape[0]} lignes × {df.shape[1]} colonnes")
+
+# Lecture de tous les onglets
+xls = pd.ExcelFile(uploaded, engine="openpyxl")
+sheet_names = xls.sheet_names
+
+# Sélection de l'onglet actif
+selected_sheet = st.selectbox("📑 Sélectionnez l'onglet :", sheet_names)
+
+# Chargement du DataFrame pour l'onglet sélectionné
+df = pd.read_excel(xls, sheet_name=selected_sheet, engine="openpyxl")
+st.success(f"Onglet « {selected_sheet} » chargé : {df.shape[0]} lignes × {df.shape[1]} colonnes")
 st.dataframe(df, height=300)
 
 # --- Prépare session_state pour le prompt ---
@@ -57,7 +66,7 @@ st.button("Ajouter tous les placeholders", on_click=insert_placeholders_bulk)
 prompt_template = st.session_state.prompt_text
 
 # 5) Validation des placeholders
-placeholders = re.findall(r"\{([^}]+)\}", prompt_template)
+placeholders = re.findall(r"\\{([^}]+)\\}", prompt_template)
 if not placeholders:
     st.warning("Aucun placeholder détecté pour le moment.")
 invalid = [c for c in placeholders if c not in df.columns]
@@ -84,7 +93,7 @@ if "stop_flag" not in st.session_state:
 if do_stop:
     st.session_state.stop_flag = True
 
-# **placeholder** pour afficher le DataFrame en live
+# Placeholder pour un affichage live
 live_table = st.empty()
 progress   = st.empty()
 
