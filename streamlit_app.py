@@ -6,11 +6,9 @@ import os
 import time
 import re
 from io import BytesIO
-from dotenv import load_dotenv
+import streamlit as st
 
-# ⚙️ Chargement clé API
-load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 if not openai.api_key:
     st.error("Clé API OpenAI non configurée. Veuillez contacter l'administrateur.")
     st.stop()
