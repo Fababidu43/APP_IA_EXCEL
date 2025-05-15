@@ -32,12 +32,26 @@ st.text_area(
     key="prompt_text"
 )
 
-# 3) Insertion de placeholders via callback
+# 3) Insertion de placeholders
 st.markdown("### ➕ Ajouter un placeholder")
+
+# 3A) Sélection simple d'une colonne
 col_to_insert = st.selectbox("Sélectionnez la colonne :", df.columns, key="select_placeholder")
 def insert_placeholder():
     st.session_state.prompt_text += f"{{{col_to_insert}}}"
 st.button("Ajouter `{Colonne}`", on_click=insert_placeholder)
+
+# 3B) Sélection multiple de colonnes
+cols_to_insert = st.multiselect(
+    "Sélectionnez une ou plusieurs colonnes à ajouter",
+    options=df.columns
+)
+def insert_placeholders_bulk():
+    for col in cols_to_insert:
+        placeholder = f"{{{col}}}"
+        if placeholder not in st.session_state.prompt_text:
+            st.session_state.prompt_text += " " + placeholder
+st.button("Ajouter tous les placeholders", on_click=insert_placeholders_bulk)
 
 # 4) Récupère le prompt final
 prompt_template = st.session_state.prompt_text
@@ -57,9 +71,9 @@ if output_col not in df.columns:
     df[output_col] = ""
 
 # 7) Configuration de l’API
-model      = st.selectbox("Modèle", ["gpt-4o-mini", "gpt-3.5-turbo"])
-temperature= st.slider("Température", 0.0, 1.0, 0.0)
-rate_limit = st.number_input("Pause entre requêtes (s)", min_value=0.0, step=0.1, value=1.0)
+model       = st.selectbox("Modèle", ["gpt-4o-mini", "gpt-3.5-turbo"])
+temperature = st.slider("Température", 0.0, 1.0, 0.0)
+rate_limit  = st.number_input("Pause entre requêtes (s)", min_value=0.0, step=0.1, value=1.0)
 
 # 8) Lancer / Arrêter
 col1, col2 = st.columns(2)
