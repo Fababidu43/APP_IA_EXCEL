@@ -2,7 +2,6 @@
 
 A simple Streamlit app template for you to modify!
 
-<<<<<<< HEAD
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://appiaexcel-wdxmmzxncffnwsyogvkr8d.streamlit.app/)
 
 ### How to run it on your own machine
