@@ -12,28 +12,24 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 st.set_page_config(page_title="AI Excel Processor", layout="wide")
 st.title("🔧 AI Excel Processor")
 
-# 1) Upload & récupère tous les onglets
+# 1) Upload & load all sheets
 uploaded = st.file_uploader("📂 Chargez votre fichier Excel", type=["xlsx"])
 if not uploaded:
     st.stop()
+all_sheets = pd.read_excel(uploaded, engine="openpyxl", sheet_name=None)
+sheet_names = list(all_sheets.keys())
 
-# Lecture de tous les onglets
-xls = pd.ExcelFile(uploaded, engine="openpyxl")
-sheet_names = xls.sheet_names
-
-# Sélection de l'onglet actif
-selected_sheet = st.selectbox("📑 Sélectionnez l'onglet :", sheet_names)
-
-# Chargement du DataFrame pour l'onglet sélectionné
-df = pd.read_excel(xls, sheet_name=selected_sheet, engine="openpyxl")
-st.success(f"Onglet « {selected_sheet} » chargé : {df.shape[0]} lignes × {df.shape[1]} colonnes")
-st.dataframe(df, height=300)
+# 2) Choix de l'onglet
+selected_sheet = st.selectbox("🗂 Sélectionnez l'onglet", sheet_names, key="select_sheet")
+df = all_sheets[selected_sheet].copy()
+st.success(f"Onglet « {selected_sheet} » : {df.shape[0]} lignes × {df.shape[1]} colonnes")
+st.dataframe(df.head(100), height=300)  # affiche seulement les 100 premières lignes pour la perf
 
 # --- Prépare session_state pour le prompt ---
 if "prompt_text" not in st.session_state:
     st.session_state.prompt_text = ""
 
-# 2) Zone de saisie du prompt
+# 3) Zone de saisie du prompt
 st.markdown("### ✏️ Rédigez votre prompt")
 st.text_area(
     "Prompt (utilisez {Colonne} pour insérer un placeholder)",
@@ -41,32 +37,32 @@ st.text_area(
     key="prompt_text"
 )
 
-# 3) Insertion de placeholders
+# 4) Insertion de placeholders
 st.markdown("### ➕ Ajouter un placeholder")
 
-# 3A) Sélection simple d'une colonne
+# 4A) Sélection simple d'une colonne
 col_to_insert = st.selectbox("Sélectionnez la colonne :", df.columns, key="select_placeholder")
 def insert_placeholder():
-    st.session_state.prompt_text += f"{{{col_to_insert}}}"
+    placeholder = f"{{{col_to_insert}}}"
+    if placeholder not in st.session_state.prompt_text:
+        st.session_state.prompt_text += placeholder + " "
 st.button("Ajouter `{Colonne}`", on_click=insert_placeholder)
 
-# 3B) Sélection multiple de colonnes
+# 4B) Sélection multiple de colonnes
 cols_to_insert = st.multiselect(
-    "Sélectionnez une ou plusieurs colonnes à ajouter",
+    "Sélectionnez plusieurs colonnes à ajouter d’un coup",
     options=df.columns
 )
 def insert_placeholders_bulk():
     for col in cols_to_insert:
         placeholder = f"{{{col}}}"
         if placeholder not in st.session_state.prompt_text:
-            st.session_state.prompt_text += " " + placeholder
+            st.session_state.prompt_text += placeholder + " "
 st.button("Ajouter tous les placeholders", on_click=insert_placeholders_bulk)
 
-# 4) Récupère le prompt final
+# 5) Récupère et valide le prompt
 prompt_template = st.session_state.prompt_text
-
-# 5) Validation des placeholders
-placeholders = re.findall(r"\\{([^}]+)\\}", prompt_template)
+placeholders = re.findall(r"\{([^}]+)\}", prompt_template)
 if not placeholders:
     st.warning("Aucun placeholder détecté pour le moment.")
 invalid = [c for c in placeholders if c not in df.columns]
@@ -93,10 +89,6 @@ if "stop_flag" not in st.session_state:
 if do_stop:
     st.session_state.stop_flag = True
 
-# Placeholder pour un affichage live
-live_table = st.empty()
-progress   = st.empty()
-
 def call_chat(prompt: str) -> str:
     try:
         resp = client.chat.completions.create(
@@ -111,13 +103,16 @@ def call_chat(prompt: str) -> str:
     except Exception as e:
         return f"Erreur API : {e}"
 
-# 9) Boucle de traitement
+# 9) Boucle de traitement avec progress bar (pas de live table)
 if do_run:
     st.session_state.stop_flag = False
+    progress_bar = st.progress(0)
+    total = len(df)
     for i, row in df.iterrows():
         if st.session_state.stop_flag:
             st.warning("⚠️ Traitement interrompu.")
             break
+
         if not row.get(output_col):
             data = {c: ("" if pd.isna(v) else str(v)) for c, v in row.items()}
             try:
@@ -127,22 +122,23 @@ if do_run:
                 continue
 
             df.at[i, output_col] = call_chat(filled)
-            live_table.dataframe(df, height=300)
 
-        progress.text(f"Traitement : {i+1}/{len(df)}")
+        progress_bar.progress(int((i + 1) / total * 100))
         time.sleep(rate_limit)
 
     st.success("✅ Traitement terminé.")
-    progress.empty()
-else:
-    live_table.dataframe(df, height=300)
+    st.dataframe(df.head(100), height=300)
 
-# 10) Téléchargement
+# 10) Prépare l’export de tous les onglets
+all_sheets[selected_sheet] = df
 buf = BytesIO()
-df.to_excel(buf, index=False, engine="openpyxl")
+with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+    for name, sheet_df in all_sheets.items():
+        sheet_df.to_excel(writer, sheet_name=name, index=False)
 buf.seek(0)
+
 st.download_button(
-    "💾 Télécharger les résultats",
+    "💾 Télécharger les résultats (tous onglets)",
     data=buf,
     file_name="output.xlsx",
     mime="application/vnd.openxmlformats-officedocument-spreadsheetml.sheet"
