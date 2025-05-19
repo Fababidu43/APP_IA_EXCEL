@@ -56,13 +56,25 @@ st.text_area(
 )
 
 st.markdown("### ➕ Sélectionnez vos placeholders")
-cols = st.multiselect("Colonnes à insérer", options=list(df.columns))
-# On met à jour automatiquement la zone de prompt
-if st.button("Ajouter les placeholders sélectionnés"):
-    for col in cols:
+# on stocke la sélection dans session_state
+st.multiselect(
+    "Colonnes à insérer",
+    options=list(df.columns),
+    key="cols_to_insert"
+)
+
+def insert_placeholders_bulk():
+    """Callback : ajoute les placeholders sélectionnés au prompt."""
+    for col in st.session_state.cols_to_insert:
         ph = f"{{{col}}}"
         if ph not in st.session_state.prompt_text:
             st.session_state.prompt_text += ph + " "
+
+st.button(
+    "Ajouter tous les placeholders",
+    on_click=insert_placeholders_bulk,
+    key="btn_add_placeholders"
+)
 
 # Validation basique des placeholders
 prompt_template = st.session_state.prompt_text
@@ -146,7 +158,7 @@ if do_run:
 
     st.success("✅ Traitement terminé.")
     live_table.dataframe(df.head(50), height=250)
-
+    
 # 7) Export de tous les onglets sans recharger intégralement
 if st.button("💾 Télécharger les résultats (tous onglets)"):
     # On recharge uniquement les autres feuilles pour l'export
