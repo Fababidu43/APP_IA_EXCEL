@@ -14,12 +14,12 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 st.set_page_config(page_title="AI Excel Processor", layout="wide")
 st.title("🔧 AI Excel Processor")
 
-# 1) Upload & cache les bytes et le méta de l’upload (nom+taille en lieu d’`id`)
+# 1) Upload & cache les bytes, le méta et le workbook
 uploaded = st.file_uploader("📂 Chargez votre fichier Excel", type=["xlsx"])
 if not uploaded:
     st.stop()
 
-# On redétecte un nouveau fichier si le nom ou la taille change
+# on redétecte un nouveau fichier si le nom ou la taille change
 if (
     "bytes" not in st.session_state
     or st.session_state.filename != uploaded.name
@@ -28,17 +28,25 @@ if (
     st.session_state.bytes     = uploaded.read()
     st.session_state.filename  = uploaded.name
     st.session_state.filesize  = uploaded.size
-    # Récupère simplement la liste des feuilles sans tout charger
-    wb = load_workbook(filename=BytesIO(st.session_state.bytes), read_only=True)
+
+    # on charge le workbook en mode écriture directement
+    wb = load_workbook(
+        filename=BytesIO(st.session_state.bytes),
+        read_only=False,
+        data_only=False
+    )
+    st.session_state.wb = wb
     st.session_state.sheet_names = wb.sheetnames
 
 sheet_names = st.session_state.sheet_names
 
 # 2) Sélection de la feuille (lazy loading)
 selected_sheet = st.selectbox("🗂 Sélectionnez l'onglet", sheet_names)
+
 @st.cache_data(show_spinner=False)
 def load_sheet(excel_bytes: bytes, sheet: str) -> pd.DataFrame:
     return pd.read_excel(BytesIO(excel_bytes), engine="openpyxl", sheet_name=sheet)
+
 df = load_sheet(st.session_state.bytes, selected_sheet).copy()
 
 st.success(f"Onglet « {selected_sheet} » : {df.shape[0]} lignes × {df.shape[1]} colonnes")
@@ -50,13 +58,12 @@ if "prompt_text" not in st.session_state:
 
 st.markdown("### ✏️ Rédigez votre prompt")
 st.text_area(
-    "Prompt (utilisez {Colonne} pour insérer un placeholder)",
+    "Prompt (utilisez #Colonne# pour insérer un placeholder)",
     height=200,
     key="prompt_text"
 )
 
 st.markdown("### ➕ Sélectionnez vos placeholders")
-# on stocke la sélection dans session_state
 st.multiselect(
     "Colonnes à insérer",
     options=list(df.columns),
@@ -66,7 +73,7 @@ st.multiselect(
 def insert_placeholders_bulk():
     """Callback : ajoute les placeholders sélectionnés au prompt."""
     for col in st.session_state.cols_to_insert:
-        ph = f"{{{col}}}"
+        ph = f"#{col}#"
         if ph not in st.session_state.prompt_text:
             st.session_state.prompt_text += ph + " "
 
@@ -76,9 +83,9 @@ st.button(
     key="btn_add_placeholders"
 )
 
-# Validation basique des placeholders
+# Validation basique des placeholders (nouvelle syntaxe #Colonne#)
 prompt_template = st.session_state.prompt_text
-placeholders = re.findall(r"\{([^}]+)\}", prompt_template)
+placeholders = re.findall(r"#([^#]+)#", prompt_template)
 invalid = [c for c in placeholders if c not in df.columns]
 if invalid:
     st.error(f"Colonnes invalides détectées : {', '.join(invalid)}")
@@ -108,7 +115,7 @@ if do_stop:
 live_table   = st.empty()
 progress_bar = st.progress(0)
 
-# Cache local des prompts déjà exécutés (évite les doublons sur gros fichiers)
+# Cache local des prompts déjà exécutés
 if "prompt_cache" not in st.session_state:
     st.session_state.prompt_cache = {}
 
@@ -130,7 +137,7 @@ def call_chat(prompt: str) -> str:
     st.session_state.prompt_cache[prompt] = text
     return text
 
-# 6) Boucle de traitement
+# 6) Boucle de traitement avec remplacement manuel des #placeholders#
 if do_run:
     st.session_state.stop_flag = False
     total = len(df)
@@ -142,31 +149,31 @@ if do_run:
 
             if not row.get(output_col):
                 data = {c: ("" if pd.isna(v) else str(v)) for c, v in row.items()}
-                try:
-                    filled = prompt_template.format(**data)
-                except KeyError as e:
-                    df.at[i, output_col] = f"Placeholder manquant : {e}"
-                else:
-                    df.at[i, output_col] = call_chat(filled)
+                filled = prompt_template
+                for col in placeholders:
+                    filled = filled.replace(f"#{col}#", data.get(col, ""))
+                df.at[i, output_col] = call_chat(filled)
 
             live_table.dataframe(df.head(50), height=250)
             progress_bar.progress(int((i + 1) / total * 100))
             time.sleep(rate_limit)
     except Exception as e:
-        # Affiche le stack trace dans l’UI pour faciliter le debug
         st.exception(e)
 
     st.success("✅ Traitement terminé.")
     live_table.dataframe(df.head(50), height=250)
-    
-# 7) Export de tous les onglets sans recharger intégralement
+
+# 7) Export en réutilisant st.session_state.wb pour ne pas écraser les autres onglets
 if st.button("💾 Télécharger les résultats (tous onglets)"):
-    # On recharge uniquement les autres feuilles pour l'export
     buf = BytesIO()
-    wb = load_workbook(filename=BytesIO(st.session_state.bytes))
-    # Remplace seulement la feuille travaillée
-    ws = wb[selected_sheet]
-    wb.remove(ws)
+    wb = st.session_state.wb  # même objet, avec vos modifications
+
+    # Supprime l’ancienne version de la feuille traitée
+    if selected_sheet in wb.sheetnames:
+        old_ws = wb[selected_sheet]
+        wb.remove(old_ws)
+
+    # Recrée la feuille en première position
     new_ws = wb.create_sheet(selected_sheet, 0)
     for r in dataframe_to_rows(df, index=False, header=True):
         new_ws.append(r)
