@@ -15,6 +15,20 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 # — Page config
 st.set_page_config(page_title="AI Excel Processor", layout="wide")
 
+# — Initialisation des clés session_state
+for key, default in [
+    ("model", "gpt-4o-mini"),
+    ("temperature", 0.0),
+    ("rate_limit", 1.0),
+    ("stop_flag", False),
+    ("error_rows", []),
+    ("log_entries", []),
+    ("last_processed", -1),
+    ("completed", False),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
 # — Sidebar : Réglages globaux
 with st.sidebar:
     st.header("⚙️ Configurations")
