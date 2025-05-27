@@ -8,7 +8,6 @@ from openai import OpenAI
 from openpyxl import load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import csv
 
 # — Setup OpenAI client
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
@@ -20,7 +19,7 @@ st.set_page_config(page_title="AI Excel Processor", layout="wide")
 with st.sidebar:
     st.header("⚙️ Configurations")
 
-    # 3. Préconfigurations one-click
+    # Préconfigurations one-click
     presets = {
         "Exploration rapide": ("gpt-3.5-turbo", 0.7, 0.2),
         "Production stable":    ("gpt-4o-mini", 0.0, 1.0),
@@ -30,19 +29,16 @@ with st.sidebar:
         options=[""] + list(presets.keys()),
         key="preset"
     )
-
-    # callback pour appliquer un preset
     def _apply_preset():
         if st.session_state.preset in presets:
             m, t, r = presets[st.session_state.preset]
             st.session_state.model = m
             st.session_state.temperature = t
             st.session_state.rate_limit = r
-
     if st.button("🔄 Appliquer preset"):
         _apply_preset()
 
-    # choix du modèle, température, rate-limit
+    # Modèle, température, rate-limit
     model       = st.selectbox("Modèle", ["gpt-4o-mini", "gpt-3.5-turbo"], key="model")
     temperature = st.slider("Température", 0.0, 1.0, 0.0, key="temperature")
     rate_limit  = st.number_input("Pause entre requêtes (s)", 0.0, step=0.1, value=1.0, key="rate_limit")
@@ -93,9 +89,12 @@ if filter_kw:
         axis=1
     )]
 
-# — Éditeur de données
+# — Éditeur de données (fallback si experimental_data_editor n’existe pas)
 st.markdown("### ✏️ Éditeur de données")
-df = st.experimental_data_editor(df, num_rows="dynamic")
+if hasattr(st, "data_editor"):
+    df = st.data_editor(df, num_rows="dynamic")
+else:
+    df = st.experimental_data_editor(df, num_rows="dynamic")
 
 st.markdown(f"**{sheet}** : {df.shape[0]} lignes × {df.shape[1]} colonnes")
 
@@ -119,7 +118,6 @@ st.multiselect(
     key="cols_to_insert"
 )
 
-# bouton d’insertion rapide
 def _insert_all_ph():
     for c in st.session_state.cols_to_insert:
         ph = f"#{c}#"
@@ -137,7 +135,7 @@ if invalid:
 if not placeholders:
     st.warning("Aucun placeholder détecté.")
 
-# 4. Aperçu interactif du prompt
+# Aperçu interactif du prompt (1ʳᵉ ligne)
 if placeholders and not df.empty:
     st.markdown("#### 📄 Aperçu (1ʳᵉ ligne)")
     row0 = df.iloc[0].to_dict()
