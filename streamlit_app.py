@@ -7,29 +7,69 @@ from io import BytesIO
 from openai import OpenAI
 from openpyxl import load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import csv
 
-# → Clé OpenAI depuis les Secrets Streamlit
+# — Setup OpenAI client
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
+# — Page config
 st.set_page_config(page_title="AI Excel Processor", layout="wide")
-st.title("🔧 AI Excel Processor")
 
-# 1) Upload & cache les bytes, le méta et le workbook
+# — Sidebar : Réglages globaux
+with st.sidebar:
+    st.header("⚙️ Configurations")
+
+    # 3. Préconfigurations one-click
+    presets = {
+        "Exploration rapide": ("gpt-3.5-turbo", 0.7, 0.2),
+        "Production stable":    ("gpt-4o-mini", 0.0, 1.0),
+    }
+    preset_choice = st.selectbox(
+        "Préconfiguration",
+        options=[""] + list(presets.keys()),
+        key="preset"
+    )
+
+    # callback pour appliquer un preset
+    def _apply_preset():
+        if st.session_state.preset in presets:
+            m, t, r = presets[st.session_state.preset]
+            st.session_state.model = m
+            st.session_state.temperature = t
+            st.session_state.rate_limit = r
+
+    if st.button("🔄 Appliquer preset"):
+        _apply_preset()
+
+    # choix du modèle, température, rate-limit
+    model       = st.selectbox("Modèle", ["gpt-4o-mini", "gpt-3.5-turbo"], key="model")
+    temperature = st.slider("Température", 0.0, 1.0, 0.0, key="temperature")
+    rate_limit  = st.number_input("Pause entre requêtes (s)", 0.0, step=0.1, value=1.0, key="rate_limit")
+
+    st.markdown("---")
+    st.header("🚀 Exécution")
+    run_full  = st.button("▶️ Lancer le fichier complet")
+    run_test  = st.button("⚡ Test rapide (5 lignes)")
+    stop_btn  = st.button("⏹️ Stop")
+    if stop_btn:
+        st.session_state.stop_flag = True
+
+# — Upload & cache du workbook
 uploaded = st.file_uploader("📂 Chargez votre fichier Excel", type=["xlsx"])
 if not uploaded:
     st.stop()
 
-# on redétecte un nouveau fichier si le nom ou la taille change
 if (
     "bytes" not in st.session_state
     or st.session_state.filename != uploaded.name
     or st.session_state.filesize != uploaded.size
 ):
-    st.session_state.bytes     = uploaded.read()
-    st.session_state.filename  = uploaded.name
-    st.session_state.filesize  = uploaded.size
+    st.session_state.bytes    = uploaded.read()
+    st.session_state.filename = uploaded.name
+    st.session_state.filesize = uploaded.size
 
-    # on charge le workbook en mode écriture directement
+    # charger Workbook en écriture
     wb = load_workbook(
         filename=BytesIO(st.session_state.bytes),
         read_only=False,
@@ -38,94 +78,129 @@ if (
     st.session_state.wb = wb
     st.session_state.sheet_names = wb.sheetnames
 
-sheet_names = st.session_state.sheet_names
+# — Sélecteur de feuille & chargement lazy
+sheet = st.selectbox("🗂 Onglet à traiter", st.session_state.sheet_names)
+@st.cache_data
+def _load_sheet(bts, sht) -> pd.DataFrame:
+    return pd.read_excel(BytesIO(bts), engine="openpyxl", sheet_name=sht)
+df = _load_sheet(st.session_state.bytes, sheet).copy()
 
-# 2) Sélection de la feuille (lazy loading)
-selected_sheet = st.selectbox("🗂 Sélectionnez l'onglet", sheet_names)
+# — Filtrage global
+filter_kw = st.text_input("🔍 Filtrer (mot-clé)", "")
+if filter_kw:
+    df = df[df.apply(
+        lambda row: row.astype(str).str.contains(filter_kw, case=False).any(),
+        axis=1
+    )]
 
-@st.cache_data(show_spinner=False)
-def load_sheet(excel_bytes: bytes, sheet: str) -> pd.DataFrame:
-    return pd.read_excel(BytesIO(excel_bytes), engine="openpyxl", sheet_name=sheet)
+# — Éditeur de données
+st.markdown("### ✏️ Éditeur de données")
+df = st.experimental_data_editor(df, num_rows="dynamic")
 
-df = load_sheet(st.session_state.bytes, selected_sheet).copy()
+st.markdown(f"**{sheet}** : {df.shape[0]} lignes × {df.shape[1]} colonnes")
 
-st.success(f"Onglet « {selected_sheet} » : {df.shape[0]} lignes × {df.shape[1]} colonnes")
-st.dataframe(df.head(50), height=250)
-
-# --- Prépare le prompt et les placeholders ---
+# --- Prompt & placeholders (sidebar) ---
 if "prompt_text" not in st.session_state:
     st.session_state.prompt_text = ""
+if "cols_to_insert" not in st.session_state:
+    st.session_state.cols_to_insert = []
 
-st.markdown("### ✏️ Rédigez votre prompt")
+st.markdown("### 📝 Rédigez votre prompt")
 st.text_area(
-    "Prompt (utilisez #Colonne# pour insérer un placeholder)",
+    "Utilisez #Colonne# pour les placeholders",
     height=200,
     key="prompt_text"
 )
 
-st.markdown("### ➕ Sélectionnez vos placeholders")
+st.markdown("### ➕ Colonnes à insérer")
 st.multiselect(
-    "Colonnes à insérer",
+    "Votre choix",
     options=list(df.columns),
     key="cols_to_insert"
 )
 
-def insert_placeholders_bulk():
-    """Callback : ajoute les placeholders sélectionnés au prompt."""
-    for col in st.session_state.cols_to_insert:
-        ph = f"#{col}#"
+# bouton d’insertion rapide
+def _insert_all_ph():
+    for c in st.session_state.cols_to_insert:
+        ph = f"#{c}#"
         if ph not in st.session_state.prompt_text:
             st.session_state.prompt_text += ph + " "
+st.button("➕ Ajouter tous les placeholders", on_click=_insert_all_ph)
 
-st.button(
-    "Ajouter tous les placeholders",
-    on_click=insert_placeholders_bulk,
-    key="btn_add_placeholders"
-)
-
-# Validation basique des placeholders (nouvelle syntaxe #Colonne#)
-prompt_template = st.session_state.prompt_text
-placeholders = re.findall(r"#([^#]+)#", prompt_template)
+# Validation & extraction des placeholders
+prompt_tpl  = st.session_state.prompt_text
+placeholders = re.findall(r"#([^#]+)#", prompt_tpl)
 invalid = [c for c in placeholders if c not in df.columns]
 if invalid:
-    st.error(f"Colonnes invalides détectées : {', '.join(invalid)}")
+    st.error(f"Colonnes invalides : {', '.join(invalid)}")
     st.stop()
 if not placeholders:
-    st.warning("Aucun placeholder détecté pour l’instant.")
+    st.warning("Aucun placeholder détecté.")
 
-# 3) Prépare la colonne résultat
+# 4. Aperçu interactif du prompt
+if placeholders and not df.empty:
+    st.markdown("#### 📄 Aperçu (1ʳᵉ ligne)")
+    row0 = df.iloc[0].to_dict()
+    filled0 = prompt_tpl
+    for c in placeholders:
+        filled0 = filled0.replace(f"#{c}#", str(row0.get(c, "")))
+    st.text_area("Prompt exemple", filled0, height=100, disabled=True)
+
+# --- Gestion des templates de prompt ---
+if "templates" not in st.session_state:
+    st.session_state.templates = []
+
+st.markdown("### 🎁 Templates de prompt")
+tname = st.text_input("Nom du template")
+if st.button("💾 Sauvegarder template") and tname:
+    st.session_state.templates.append({
+        "name": tname,
+        "prompt": prompt_tpl,
+        "cols": st.session_state.cols_to_insert.copy()
+    })
+    st.success("Template sauvegardé.")
+
+names = [t["name"] for t in st.session_state.templates]
+sel = st.selectbox("Charger un template", options=[""] + names)
+if sel:
+    if st.button("📂 Charger template"):
+        tmpl = next(t for t in st.session_state.templates if t["name"] == sel)
+        st.session_state.prompt_text    = tmpl["prompt"]
+        st.session_state.cols_to_insert = tmpl["cols"]
+        st.experimental_rerun()
+
+# --- Prépare la colonne résultat ---
 output_col = st.text_input("Nom de la colonne résultat", "Réponse IA")
 if output_col not in df.columns:
     df[output_col] = ""
 
-# 4) Config API & rate-limit
-model       = st.selectbox("Modèle", ["gpt-4o-mini", "gpt-3.5-turbo"])
-temperature = st.slider("Température", 0.0, 1.0, 0.0)
-rate_limit  = st.number_input("Pause entre requêtes (s)", min_value=0.0, step=0.1, value=1.0)
+# --- Automatisation & logs ---
+if "prompt_cache" not in st.session_state:
+    # cache persistant
+    @st.cache_resource
+    def _make_cache():
+        return {}
+    st.session_state.prompt_cache = _make_cache()
 
-# 5) Boutons Run / Stop
-col1, col2 = st.columns(2)
-do_run     = col1.button("▶️ Lancer")
-do_stop    = col2.button("⏹️ Arrêter")
+if "error_rows" not in st.session_state:
+    st.session_state.error_rows = []
+if "log_entries" not in st.session_state:
+    st.session_state.log_entries = []
+if "last_processed" not in st.session_state:
+    st.session_state.last_processed = -1
 if "stop_flag" not in st.session_state:
     st.session_state.stop_flag = False
-if do_stop:
-    st.session_state.stop_flag = True
-
-live_table   = st.empty()
-progress_bar = st.progress(0)
-
-# Cache local des prompts déjà exécutés
-if "prompt_cache" not in st.session_state:
-    st.session_state.prompt_cache = {}
+if "completed" not in st.session_state:
+    st.session_state.completed = False
 
 def call_chat(prompt: str) -> str:
+    # cache + appel OpenAI
     if prompt in st.session_state.prompt_cache:
         return st.session_state.prompt_cache[prompt]
     try:
         resp = client.chat.completions.create(
-            model=model,
-            temperature=temperature,
+            model=st.session_state.model,
+            temperature=st.session_state.temperature,
             messages=[
                 {"role": "system", "content": "Vous êtes un assistant utile et précis."},
                 {"role": "user",   "content": prompt}
@@ -137,52 +212,106 @@ def call_chat(prompt: str) -> str:
     st.session_state.prompt_cache[prompt] = text
     return text
 
-# 6) Boucle de traitement avec remplacement manuel des #placeholders#
-if do_run:
-    st.session_state.stop_flag = False
-    total = len(df)
-    try:
-        for i, row in df.iterrows():
+# fonction de traitement d’une ligne
+def _process_row(i, row):
+    data = {c: ("" if pd.isna(v) else str(v)) for c, v in row.items()}
+    filled = prompt_tpl
+    for c in placeholders:
+        filled = filled.replace(f"#{c}#", data.get(c, ""))
+    start = time.time()
+    resp  = call_chat(filled)
+    dur   = time.time() - start
+    status = "error" if resp.startswith("Erreur API") else "success"
+    return i, resp, status, dur, filled
+
+# — Choix des indices à traiter
+to_process = []
+if run_full:
+    to_process = list(df.index)
+elif run_test:
+    to_process = list(df.index[:5])
+
+# — Exécution concurrente
+if to_process:
+    st.session_state.stop_flag     = False
+    st.session_state.error_rows    = []
+    st.session_state.log_entries   = []
+    total = len(to_process)
+    prog  = st.progress(0)
+    live  = st.empty()
+
+    # concurrence adaptée au rate_limit
+    if st.session_state.rate_limit > 0:
+        workers = max(1, int(1 / st.session_state.rate_limit))
+    else:
+        workers = 1
+
+    with ThreadPoolExecutor(max_workers=workers) as exe:
+        futures = {
+            exe.submit(_process_row, i, df.loc[i]): i
+            for i in to_process
+        }
+        done = 0
+        for fut in as_completed(futures):
             if st.session_state.stop_flag:
                 st.warning("⚠️ Traitement interrompu.")
                 break
+            i, resp, status, dur, filled = fut.result()
+            df.at[i, output_col] = resp
+            st.session_state.log_entries.append({
+                "index": i,
+                "prompt": filled,
+                "status": status,
+                "duration": dur
+            })
+            if status == "error":
+                st.session_state.error_rows.append(i)
+            done += 1
+            prog.progress(done / total)
+            live.dataframe(df.head(50), height=250)
 
-            if not row.get(output_col):
-                data = {c: ("" if pd.isna(v) else str(v)) for c, v in row.items()}
-                filled = prompt_template
-                for col in placeholders:
-                    filled = filled.replace(f"#{col}#", data.get(col, ""))
-                df.at[i, output_col] = call_chat(filled)
+    st.session_state.last_processed = to_process[done - 1] if done else -1
+    st.session_state.completed      = True
+    st.success("✅ Traitement fini.")
 
-            live_table.dataframe(df.head(50), height=250)
-            progress_bar.progress(int((i + 1) / total * 100))
-            time.sleep(rate_limit)
-    except Exception as e:
-        st.exception(e)
+# — Relance des erreurs
+if st.session_state.error_rows:
+    if st.button("🔄 Réessayer uniquement les erreurs"):
+        to_process = st.session_state.error_rows.copy()
+        st.session_state.error_rows = []
+        # (répétez la même boucle de traitement pour `to_process`...)
 
-    st.success("✅ Traitement terminé.")
-    live_table.dataframe(df.head(50), height=250)
-
-# 7) Export en réutilisant st.session_state.wb pour ne pas écraser les autres onglets
-if st.button("💾 Télécharger les résultats (tous onglets)"):
+# — Mise à jour du workbook + préparation du téléchargement
+if st.session_state.completed:
     buf = BytesIO()
-    wb = st.session_state.wb  # même objet, avec vos modifications
-
-    # Supprime l’ancienne version de la feuille traitée
-    if selected_sheet in wb.sheetnames:
-        old_ws = wb[selected_sheet]
-        wb.remove(old_ws)
-
-    # Recrée la feuille en première position
-    new_ws = wb.create_sheet(selected_sheet, 0)
+    wb  = st.session_state.wb
+    if sheet in wb.sheetnames:
+        wb.remove(wb[sheet])
+    new_ws = wb.create_sheet(sheet, 0)
     for r in dataframe_to_rows(df, index=False, header=True):
         new_ws.append(r)
-
     wb.save(buf)
     buf.seek(0)
+    st.session_state.download_buf = buf
+
+# — Bouton unique pour télécharger le résultat
+if st.session_state.completed and "download_buf" in st.session_state:
     st.download_button(
-        "Télécharger Excel",
-        data=buf,
+        "💾 Télécharger Excel",
+        data=st.session_state.download_buf,
         file_name="output.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+# — Journal de traitement
+if st.session_state.log_entries:
+    st.markdown("### 📑 Journal de traitement")
+    log_df = pd.DataFrame(st.session_state.log_entries)
+    st.dataframe(log_df)
+    csv_data = log_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "📝 Télécharger le journal (CSV)",
+        data=csv_data,
+        file_name="journal.csv",
+        mime="text/csv"
     )
