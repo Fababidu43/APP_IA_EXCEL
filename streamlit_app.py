@@ -51,6 +51,12 @@ with st.sidebar:
     if stop_btn:
         st.session_state.stop_flag = True
 
+# — Global prompt cache (thread‐safe)
+@st.cache_resource
+def get_prompt_cache():
+    return {}
+prompt_cache = get_prompt_cache()
+
 # — Upload & cache du workbook
 uploaded = st.file_uploader("📂 Chargez votre fichier Excel", type=["xlsx"])
 if not uploaded:
@@ -89,7 +95,7 @@ if filter_kw:
         axis=1
     )]
 
-# — Éditeur de données (fallback si experimental_data_editor n’existe pas)
+# — Éditeur de données (fallback si nécessaire)
 st.markdown("### ✏️ Éditeur de données")
 if hasattr(st, "data_editor"):
     df = st.data_editor(df, num_rows="dynamic")
@@ -126,9 +132,9 @@ def _insert_all_ph():
 st.button("➕ Ajouter tous les placeholders", on_click=_insert_all_ph)
 
 # Validation & extraction des placeholders
-prompt_tpl  = st.session_state.prompt_text
+prompt_tpl   = st.session_state.prompt_text
 placeholders = re.findall(r"#([^#]+)#", prompt_tpl)
-invalid = [c for c in placeholders if c not in df.columns]
+invalid      = [c for c in placeholders if c not in df.columns]
 if invalid:
     st.error(f"Colonnes invalides : {', '.join(invalid)}")
     st.stop()
@@ -159,96 +165,71 @@ if st.button("💾 Sauvegarder template") and tname:
     st.success("Template sauvegardé.")
 
 names = [t["name"] for t in st.session_state.templates]
-sel = st.selectbox("Charger un template", options=[""] + names)
-if sel:
-    if st.button("📂 Charger template"):
-        tmpl = next(t for t in st.session_state.templates if t["name"] == sel)
-        st.session_state.prompt_text    = tmpl["prompt"]
-        st.session_state.cols_to_insert = tmpl["cols"]
-        st.experimental_rerun()
+sel   = st.selectbox("Charger un template", options=[""] + names)
+if sel and st.button("📂 Charger template"):
+    tmpl = next(t for t in st.session_state.templates if t["name"] == sel)
+    st.session_state.prompt_text    = tmpl["prompt"]
+    st.session_state.cols_to_insert = tmpl["cols"]
+    st.experimental_rerun()
 
 # --- Prépare la colonne résultat ---
 output_col = st.text_input("Nom de la colonne résultat", "Réponse IA")
 if output_col not in df.columns:
     df[output_col] = ""
 
-# --- Automatisation & logs ---
-if "prompt_cache" not in st.session_state:
-    # cache persistant
-    @st.cache_resource
-    def _make_cache():
-        return {}
-    st.session_state.prompt_cache = _make_cache()
-
-if "error_rows" not in st.session_state:
-    st.session_state.error_rows = []
-if "log_entries" not in st.session_state:
-    st.session_state.log_entries = []
-if "last_processed" not in st.session_state:
-    st.session_state.last_processed = -1
-if "stop_flag" not in st.session_state:
-    st.session_state.stop_flag = False
-if "completed" not in st.session_state:
-    st.session_state.completed = False
+# --- Init logs & state ---
+if "error_rows" not in st.session_state:    st.session_state.error_rows    = []
+if "log_entries" not in st.session_state:  st.session_state.log_entries   = []
+if "last_processed" not in st.session_state: st.session_state.last_processed = -1
+if "stop_flag" not in st.session_state:    st.session_state.stop_flag     = False
+if "completed" not in st.session_state:    st.session_state.completed     = False
 
 def call_chat(prompt: str) -> str:
-    # cache + appel OpenAI
-    if prompt in st.session_state.prompt_cache:
-        return st.session_state.prompt_cache[prompt]
+    if prompt in prompt_cache:
+        return prompt_cache[prompt]
     try:
         resp = client.chat.completions.create(
             model=st.session_state.model,
             temperature=st.session_state.temperature,
             messages=[
-                {"role": "system", "content": "Vous êtes un assistant utile et précis."},
-                {"role": "user",   "content": prompt}
+                {"role": "system",  "content": "Vous êtes un assistant utile et précis."},
+                {"role": "user",    "content": prompt}
             ]
         )
         text = resp.choices[0].message.content.strip()
     except Exception as e:
         text = f"Erreur API : {e}"
-    st.session_state.prompt_cache[prompt] = text
+    prompt_cache[prompt] = text
     return text
 
-# fonction de traitement d’une ligne
 def _process_row(i, row):
-    data = {c: ("" if pd.isna(v) else str(v)) for c, v in row.items()}
+    data   = {c: ("" if pd.isna(v) else str(v)) for c, v in row.items()}
     filled = prompt_tpl
     for c in placeholders:
         filled = filled.replace(f"#{c}#", data.get(c, ""))
-    start = time.time()
-    resp  = call_chat(filled)
-    dur   = time.time() - start
+    start  = time.time()
+    resp   = call_chat(filled)
+    dur    = time.time() - start
     status = "error" if resp.startswith("Erreur API") else "success"
     return i, resp, status, dur, filled
 
-# — Choix des indices à traiter
+# — Déterminer les indices à traiter
 to_process = []
-if run_full:
-    to_process = list(df.index)
-elif run_test:
-    to_process = list(df.index[:5])
+if run_full: to_process = list(df.index)
+elif run_test: to_process = list(df.index[:5])
 
 # — Exécution concurrente
 if to_process:
-    st.session_state.stop_flag     = False
-    st.session_state.error_rows    = []
-    st.session_state.log_entries   = []
+    st.session_state.stop_flag  = False
+    st.session_state.error_rows = []
+    st.session_state.log_entries = []
     total = len(to_process)
     prog  = st.progress(0)
     live  = st.empty()
 
-    # concurrence adaptée au rate_limit
-    if st.session_state.rate_limit > 0:
-        workers = max(1, int(1 / st.session_state.rate_limit))
-    else:
-        workers = 1
-
+    workers = max(1, int(1 / st.session_state.rate_limit)) if st.session_state.rate_limit > 0 else 1
     with ThreadPoolExecutor(max_workers=workers) as exe:
-        futures = {
-            exe.submit(_process_row, i, df.loc[i]): i
-            for i in to_process
-        }
+        futures = {exe.submit(_process_row, i, df.loc[i]): i for i in to_process}
         done = 0
         for fut in as_completed(futures):
             if st.session_state.stop_flag:
@@ -257,9 +238,9 @@ if to_process:
             i, resp, status, dur, filled = fut.result()
             df.at[i, output_col] = resp
             st.session_state.log_entries.append({
-                "index": i,
-                "prompt": filled,
-                "status": status,
+                "index":   i,
+                "prompt":  filled,
+                "status":  status,
                 "duration": dur
             })
             if status == "error":
@@ -277,9 +258,9 @@ if st.session_state.error_rows:
     if st.button("🔄 Réessayer uniquement les erreurs"):
         to_process = st.session_state.error_rows.copy()
         st.session_state.error_rows = []
-        # (répétez la même boucle de traitement pour `to_process`...)
+        # (vous pouvez réutiliser la même boucle ci-dessus)
 
-# — Mise à jour du workbook + préparation du téléchargement
+# — Préparation du téléchargement
 if st.session_state.completed:
     buf = BytesIO()
     wb  = st.session_state.wb
@@ -292,7 +273,7 @@ if st.session_state.completed:
     buf.seek(0)
     st.session_state.download_buf = buf
 
-# — Bouton unique pour télécharger le résultat
+# — Bouton de téléchargement unique
 if st.session_state.completed and "download_buf" in st.session_state:
     st.download_button(
         "💾 Télécharger Excel",
